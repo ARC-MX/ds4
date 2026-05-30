@@ -18795,7 +18795,8 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
                 span_bytes += sizes[i];
             }
             fprintf(stderr,
-                    "ds4: restricting Metal model map to layers %u:%s (%u spans, %.2f GiB tensor span)\n",
+                    "ds4: restricting %s model map to layers %u:%s (%u spans, %.2f GiB tensor span)\n",
+                    ds4_backend_name(e->backend),
                     load_layer_start,
                     load_end,
                     spans.len,

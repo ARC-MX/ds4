@@ -993,6 +993,17 @@ static char *cuda_model_arena_alloc(uint64_t bytes, const char *what) {
     return (char *)dev;
 }
 
+/* A raw host pointer is safe for kernels only after CUDA owns, registered, or
+ * HMM-prefetched the mapping.  Otherwise let the caller try per-range mapping
+ * or a device copy instead of surfacing an async illegal access later. */
+static const char *cuda_model_direct_fallback_ptr(const void *model_map, uint64_t offset) {
+    if (g_model_device_owned || g_model_registered || g_model_hmm_direct ||
+        getenv("DS4_CUDA_DIRECT_MODEL") != NULL) {
+        return cuda_model_ptr(model_map, offset);
+    }
+    return NULL;
+}
+
 static const char *cuda_model_range_ptr_from_fd(
         const void *model_map,
         uint64_t offset,
@@ -1008,13 +1019,13 @@ static const char *cuda_model_range_ptr_from_fd(
                     (double)bytes / 1048576.0,
                     (double)limit / 1073741824.0);
         }
-        return cuda_model_ptr(model_map, offset);
+        return cuda_model_direct_fallback_ptr(model_map, offset);
     }
 
     char *dev = cuda_model_arena_alloc(bytes, what);
     if (!dev) {
         if (getenv("DS4_CUDA_STRICT_WEIGHT_CACHE") != NULL) return NULL;
-        return cuda_model_ptr(model_map, offset);
+        return cuda_model_direct_fallback_ptr(model_map, offset);
     }
     cudaError_t err = cudaSuccess;
 
@@ -1499,6 +1510,40 @@ extern "C" int ds4_gpu_set_model_map_range(const void *model_map, uint64_t model
     if (getenv("DS4_CUDA_COPY_MODEL_CHUNKED") != NULL &&
         !cuda_model_copy_chunked(model_map, model_size, map_offset, map_size)) {
         (void)cuda_model_prefetch_range(model_map, model_size, map_offset, map_size);
+    }
+    return 1;
+}
+
+extern "C" int ds4_gpu_set_model_map_spans(
+        const void *model_map,
+        uint64_t model_size,
+        const uint64_t *offsets,
+        const uint64_t *sizes,
+        uint32_t count,
+        uint64_t max_tensor_bytes) {
+    (void)max_tensor_bytes;
+    if (!model_map || model_size == 0 || !offsets || !sizes || count == 0) return 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (offsets[i] > model_size ||
+            sizes[i] == 0 ||
+            sizes[i] > model_size - offsets[i]) {
+            return 0;
+        }
+    }
+    if (!ds4_gpu_set_model_map(model_map, model_size)) return 0;
+
+    if (getenv("DS4_CUDA_COPY_MODEL_CHUNKED") != NULL) {
+        if (count > 1) {
+            for (uint32_t i = 0; i < count; i++) {
+                (void)cuda_model_prefetch_range(model_map, model_size, offsets[i], sizes[i]);
+            }
+            return 1;
+        }
+        for (uint32_t i = 0; i < count; i++) {
+            if (!cuda_model_copy_chunked(model_map, model_size, offsets[i], sizes[i])) {
+                (void)cuda_model_prefetch_range(model_map, model_size, offsets[i], sizes[i]);
+            }
+        }
     }
     return 1;
 }
